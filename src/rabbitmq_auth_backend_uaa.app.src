@@ -9,4 +9,5 @@
          {username, "rabbit_server"},
          {password, "rabbit"},
          {resource_server_id, "rabbitmq"}]},
+  {broker_version_requirements, []},
   {applications, [kernel, stdlib, inets, amqp_client]}]}.
