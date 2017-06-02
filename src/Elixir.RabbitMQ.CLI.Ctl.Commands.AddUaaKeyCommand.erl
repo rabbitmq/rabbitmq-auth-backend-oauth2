@@ -106,7 +106,7 @@ run([Name], #{node := Node} = Options) ->
     end.
 
 output(E, Opts) ->
-    'Elixir.RabbitMQ.CLI.DefaultOutput':output(E, Opts, ?MODULE).
+    'Elixir.RabbitMQ.CLI.DefaultOutput':output(E).
 
 formatter() -> 'Elixir.RabbitMQ.CLI.Formatters.Erlang'.
 
