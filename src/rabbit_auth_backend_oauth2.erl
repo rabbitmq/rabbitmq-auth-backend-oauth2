@@ -35,8 +35,9 @@
 -compile(export_all).
 -endif.
 -define(APP, rabbitmq_auth_backend_oauth2).
--define(PICKLOCK, role_picklock).
--define(ROLEMAPPER, role_scope_map).
+-define(RESOURCE_SERVER_ID, resource_server_id).
+-define(PICK_LOCK, role_picklock).
+-define(ROLE_MAPPER, role_scope_map).
 %%--------------------------------------------------------------------
 
 description() ->
@@ -80,50 +81,28 @@ user_login_authorization(Username, AuthProps) ->
 
 check_vhost_access(#auth_user{impl = DecodedToken},
                    VHost, _AuthzData) ->
-    TokenScopes = get_scopes(DecodedToken),
-    UserScopes = case check_picklock(TokenScopes) of
-        true ->
-            get_picklock_scopes(DecodedToken);
-        false -> 
-            TokenScopes
-    end,
     with_decoded_token(DecodedToken,
         fun() ->
-            UserScopes,
-            ScopeString = rabbit_oauth2_scope:concat_scopes(UserScopes, ","),
+            Scopes      = get_scopes(DecodedToken),
+            ScopeString = rabbit_oauth2_scope:concat_scopes(Scopes, ","),
             rabbit_log:debug("Matching virtual host '~s' against the following scopes: ~s", [VHost, ScopeString]),
-            rabbit_oauth2_scope:vhost_access(VHost, UserScopes)
+            rabbit_oauth2_scope:vhost_access(VHost, Scopes)
         end).
 
 check_resource_access(#auth_user{impl = DecodedToken},
                       Resource, Permission, _AuthzContext) ->
-
-    TokenScopes = get_scopes(DecodedToken),
-    UserScopes = case check_picklock(TokenScopes) of
-        true ->
-            get_picklock_scopes(DecodedToken);
-        false -> 
-            TokenScopes
-        end,
-
     with_decoded_token(DecodedToken,
         fun() ->
-            rabbit_oauth2_scope:resource_access(Resource, Permission, UserScopes)
+            Scopes = get_scopes(DecodedToken),
+            rabbit_oauth2_scope:resource_access(Resource, Permission, Scopes)
         end).
 
 check_topic_access(#auth_user{impl = DecodedToken},
                    Resource, Permission, Context) ->
-    TokenScopes = get_scopes(DecodedToken),
-    UserScopes = case check_picklock(TokenScopes) of
-        true ->
-            get_picklock_scopes(DecodedToken);
-        false -> 
-            TokenScopes
-        end,
-
     with_decoded_token(DecodedToken,
         fun() ->
-            rabbit_oauth2_scope:topic_access(Resource, Permission, Context, UserScopes)
+            Scopes = get_scopes(DecodedToken),
+            rabbit_oauth2_scope:topic_access(Resource, Permission, Context, Scopes)
         end).
 
 state_can_expire() -> true.
@@ -165,7 +144,7 @@ validate_token_expiry(#{}) -> ok.
 check_token(Token) ->
     case uaa_jwt:decode_and_verify(Token) of
         {error, Reason} -> {refused, {error, Reason}};
-        {true, Payload} -> validate_payload(post_process_payload(Payload));
+        {true, Payload} -> post_process_identityserver_roles(validate_payload(post_process_payload(Payload)));
         {false, _}      -> {refused, signature_invalid}
     end.
 
@@ -217,7 +196,7 @@ extract_scopes_from_keycloak_permissions(Acc, [_ | T]) ->
     extract_scopes_from_keycloak_permissions(Acc, T).
 
 validate_payload(#{<<"scope">> := _Scope, <<"aud">> := _Aud} = DecodedToken) ->
-    ResourceServerEnv = application:get_env(rabbitmq_auth_backend_oauth2, resource_server_id, <<>>),
+    ResourceServerEnv = application:get_env(?APP, ?RESOURCE_SERVER_ID, <<>>),
     ResourceServerId = rabbit_data_coercion:to_binary(ResourceServerEnv),
     validate_payload(DecodedToken, ResourceServerId).
 
@@ -243,11 +222,61 @@ check_aud(Aud, ResourceServerId) ->
         _ -> {error, {badarg, {aud_is_not_a_list, Aud}}}
     end.
 
+post_process_identityserver_roles({_, DecodedToken}) ->
+    Scopes = get_scopes(DecodedToken),
+    case check_picklock(Scopes) of
+        true ->
+            {ok, DecodedToken#{<<"scope">> => override_scopes_with_predefined(DecodedToken)}};
+        false -> 
+            {ok, DecodedToken}
+    end.
+
+check_picklock(Scopes) ->
+    Picklock = application:get_env(?APP, ?PICK_LOCK, <<>>),
+    case lists:member(Picklock, Scopes) of
+        true ->
+            true;
+        false ->
+            false
+    end.
+    
+override_scopes_with_predefined(DecodedToken) ->
+    TokenRoles =  get_roles(DecodedToken),
+    RoleScopeMapper = application:get_env(?APP, ?ROLE_MAPPER, #{}),
+    UserRoles = lists:filter(
+    fun(Role) ->
+        case maps:find(Role, RoleScopeMapper) of 
+                {ok, _} ->
+                    true;
+                error ->
+                    false
+        end
+    end,
+    TokenRoles),
+    RoleScopeMapperList = maps:to_list(RoleScopeMapper),
+    UserRoleScopes = lists:filter(
+        fun({Key, _}) ->
+            case lists:member(Key, UserRoles) of
+                true ->
+                    true;
+                false ->
+                    false
+                end
+            end,
+            RoleScopeMapperList),
+    lists:flatten([Value || {_, Value} <- UserRoleScopes]).
+
 %%--------------------------------------------------------------------
 
 get_scopes(#{<<"scope">> := Scope}) -> Scope.
 
-get_roles(#{<<"role">> := Role}) -> Role.
+get_roles(#{<<"role">> := Role}) -> 
+    case is_list(Role) of
+        true ->
+            Role;
+        false ->
+            [Role]
+        end. 
 
 -spec token_from_context(map()) -> binary() | undefined.
 token_from_context(AuthProps) ->
@@ -291,18 +320,9 @@ username_from(ClientProvidedUsername, DecodedToken) ->
 
 -spec tags_from(map()) -> list(atom()).
 tags_from(DecodedToken) ->
-    TokenScopes = maps:get(<<"scope">>, DecodedToken, []),
-    UserScopes = case check_picklock(TokenScopes) of
-    true ->
-        get_picklock_scopes(DecodedToken);
-    false -> 
-        TokenScopes
-    end,
-    
-    TagScopes = matching_scopes_without_prefix(UserScopes, <<"tag:">>),
-    rabbit_log:debug("tags_from - TagScopes '~s'!",[TagScopes]),
-    Result = lists:usort(lists:map(fun rabbit_data_coercion:to_atom/1, TagScopes)),
-    Result.
+    Scopes = maps:get(<<"scope">>, DecodedToken, []),
+    TagScopes = matching_scopes_without_prefix(Scopes, <<"tag:">>),
+    lists:usort(lists:map(fun rabbit_data_coercion:to_atom/1, TagScopes)).
 
 matching_scopes_without_prefix(Scopes, PrefixPattern) ->
     PatternLength = byte_size(PrefixPattern),
@@ -318,39 +338,3 @@ matching_scopes_without_prefix(Scopes, PrefixPattern) ->
             end
         end,
         Scopes).
-
-check_picklock(Scopes) ->
-    Picklock = application:get_env(?APP, ?PICKLOCK, <<>>),
-    case lists:member(Picklock, Scopes) of
-    true ->
-        true;
-    false ->
-        false
-    end.
-
- get_picklock_scopes(DecodedToken) ->
-    TokenRoles =  get_roles(DecodedToken),
-    RoleScopeMapper = application:get_env(?APP, ?ROLEMAPPER, #{}),
-    UserRoles = lists:filter(
-    fun(Role) ->
-        case maps:find(Role, RoleScopeMapper) of 
-                {ok, _} ->
-                    true;
-                error ->
-                    false
-        end
-    end,
-    TokenRoles),
-    RoleScopeMapperList = maps:to_list(RoleScopeMapper),
-    UserRoleScopes = lists:filter(
-        fun({Key, _}) ->
-            case lists:member(Key, UserRoles) of
-                true ->
-                    true;
-                false ->
-                    false
-                end
-            end,
-            RoleScopeMapperList),
-    UserScopes = lists:flatten([Value || {_, Value} <- UserRoleScopes]),
-    UserScopes.
