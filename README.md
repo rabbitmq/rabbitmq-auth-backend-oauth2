@@ -1,5 +1,12 @@
 # OAuth 2.0 (JWT) Token Authorisation Backend for RabbitMQ
 
+## This was migrated to https://github.com/rabbitmq/rabbitmq-server
+
+This repository has been moved to the main unified RabbitMQ "monorepo", including all open issues. You can find the source under [/deps/rabbitmq_auth_backend_oauth2](https://github.com/rabbitmq/rabbitmq-server/tree/master/deps/rabbitmq_auth_backend_oauth2).
+All issues have been transferred.
+
+## Overview
+
 [![Build Status](https://travis-ci.org/rabbitmq/rabbitmq-auth-backend-oauth2.svg?branch=master)](https://travis-ci.org/rabbitmq/rabbitmq-auth-backend-oauth2)
 
 This [RabbitMQ authentication/authorisation backend](https://www.rabbitmq.com/access-control.html) plugin lets applications (clients)
